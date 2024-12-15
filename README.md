@@ -17,6 +17,7 @@ I follow all of this up with tools like httpx, eyewitness, katana, etc. as appro
 
 # Usage
 chmod +x fullonrecon.sh
+
 sudo fullonrecon {domain} OR {input-domains.txt}
 
 # Output
