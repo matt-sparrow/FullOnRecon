@@ -1,0 +1,122 @@
+#!/bin/bash
+
+# Check if an argument is provided
+if [ -z "$1" ]; then
+    echo "Usage: $0 {domain} OR $0 {filename.txt}"
+    exit 1
+fi
+
+# Determine if input is a single domain or a file
+if [ -f "$1" ]; then
+    domains=$(cat "$1")
+else
+    domains="$1"
+fi
+
+# Constants for progress tracking
+total_domains=$(echo "$domains" | wc -l)   # Total number of domains
+tasks_per_domain=10                        # Total tasks per domain
+total_tasks=$((total_domains * tasks_per_domain)) # Total tasks overall
+completed_tasks=0                          # Counter for completed tasks
+
+# Function to update the progress bar
+update_progress() {
+    local current_task=$1
+    local current_domain=$2
+
+    # Calculate percentage completed
+    local percentage=$(( (completed_tasks * 100) / total_tasks ))
+    local progress_bar_length=20
+    local completed_blocks=$(( (percentage * progress_bar_length) / 100 ))
+    local progress_bar=$(printf "%0.s=" $(seq 1 $completed_blocks))
+    progress_bar=$(printf "%-20s" "$progress_bar") # Pad to 20 characters
+
+    # Print the progress bar with the current task and domain
+    printf "\r[%-20s] %3d%% Complete (Processing: %s)" "$progress_bar" "$percentage" "$current_domain"
+}
+
+# Loop through each domain (process independently)
+for domain in $domains; do
+    echo
+    echo "[*] Starting processing for domain: $domain"
+
+    # Task 1: Run subfinder
+    echo "[*] Running subfinder for domain: $domain"
+    subfinder -d "$domain" -all -duc -o "${domain}-subs.txt" -silent
+    ((completed_tasks++))
+    update_progress $completed_tasks "$domain"
+
+    # Task 2: Resolve subdomains
+    echo "[*] Resolving subdomains to IP addresses"
+    while read -r subdomain; do
+        ip=$(dig +short "$subdomain" | grep -m 1 '^[0-9]')
+        echo "$subdomain:$ip"
+    done < "${domain}-subs.txt" > "${domain}-subs-resolution.txt"
+    ((completed_tasks++))
+    update_progress $completed_tasks "$domain"
+
+    # Task 3: Filter subdomains with valid IPs
+    echo "[*] Filtering subdomains with valid IP addresses"
+    while read -r subdomain; do
+        ip=$(dig +short "$subdomain" | grep -m 1 '^[0-9]')
+        [ -n "$ip" ] && echo "$subdomain:$ip"
+    done < "${domain}-subs.txt" > "${domain}-subs-with-ip.txt"
+    ((completed_tasks++))
+    update_progress $completed_tasks "$domain"
+
+    # Task 4: Extract IPs to targets
+    echo "[*] Extracting IP addresses to targets.txt"
+    grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "${domain}-subs-with-ip.txt" > "${domain}-targets.txt"
+    ((completed_tasks++))
+    update_progress $completed_tasks "$domain"
+
+    # Task 5: Run masscan
+    echo "[*] Running masscan on targets"
+    masscan -iL ./"${domain}-targets.txt" -p- --rate 1250 -Pn | tee "${domain}-masscan.out"
+    ((completed_tasks++))
+    update_progress $completed_tasks "$domain"
+
+    # Task 6: Extract responding hosts
+    echo "[*] Extracting responding hosts from masscan results"
+    awk '{print $NF}' "${domain}-masscan.out" | sort -u > "${domain}-responding_masscan_hosts.txt"
+    ((completed_tasks++))
+    update_progress $completed_tasks "$domain"
+
+    # Task 7: Extract unique ports
+    echo "[*] Extracting unique ports from masscan results"
+    ports=$(grep -Eo '[0-9]{1,5}/tcp' "${domain}-masscan.out" | cut -d'/' -f1 | sort -nu | paste -sd, -)
+    ((completed_tasks++))
+    update_progress $completed_tasks "$domain"
+
+    # Task 8: Run nmap service scan
+    echo "[*] Running nmap service scan on responding hosts"
+    nmap -sV -iL -T4 "${domain}-responding_masscan_hosts.txt" -p "$ports" -Pn -oA "${domain}-service_scans" > /dev/null 2>&1
+    ((completed_tasks++))
+    update_progress $completed_tasks "$domain"
+
+    # Task 9: Run nuclei
+    echo "[*] Running nuclei scans"
+    nuclei -duc -l "${domain}-responding_masscan_hosts.txt" -o "${domain}-nuclei-output.json" -silent -nc > /dev/null 2>&1
+    ((completed_tasks++))
+    update_progress $completed_tasks "$domain"
+
+    # Task 10: Identify dangling DNS entries
+    echo "[*] Identifying dangling DNS entries"
+    awk -F':' '{print $1}' "${domain}-subs-with-ip.txt" | while read -r subdomain; do
+        ip=$(grep "^$subdomain:" "${domain}-subs-with-ip.txt" | cut -d':' -f2)
+        if ! grep -q "^$ip$" "${domain}-responding_masscan_hosts.txt"; then
+            echo "$subdomain"
+        fi
+    done > "${domain}-dangling-dns.txt"
+    ((completed_tasks++))
+    update_progress $completed_tasks "$domain"
+
+    echo "[*] Completed processing for domain: $domain"
+done
+
+# Final step: Create archive
+echo
+echo "[*] Creating an archive of all results (results.tar.gz)"
+tar --exclude="$0" -czf results.tar.gz ./*
+
+echo "[*] All tasks completed. Results archived in results.tar.gz"
