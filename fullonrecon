@@ -90,7 +90,7 @@ for domain in $domains; do
 
     # Task 8: Run nmap service scan
     echo "[*] Running nmap service scan on responding hosts"
-    nmap -sV -iL -T4 "${domain}-responding_masscan_hosts.txt" -p "$ports" -Pn -oA "${domain}-service_scans" > /dev/null 2>&1
+    nmap -sV -T4 -iL "${domain}-responding_masscan_hosts.txt" -p "$ports" -Pn -oA "${domain}-service_scans"
     ((completed_tasks++))
     update_progress $completed_tasks "$domain"
 
